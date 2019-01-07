@@ -1,0 +1,224 @@
+---
+title: "House EDA and Clean"
+author: "Fiona R Lodge"
+date: "January 6, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Loads
+
+```{r loads, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+set.seed(101)
+
+estate <- read.csv('C:\\Users\\Owner\\Documents\\Securian interview\\real_estate_train.csv',
+                   stringsAsFactors = F)
+```
+## Exploration of Missing Values
+
+```{r cars}
+num.nas <- 
+  estate %>%
+  summarise_all(funs(sum(is.na(.)))) %>%
+  select_if(. > 0) %>%
+  gather(key = 'variable', value = 'missing.values') %>%
+  arrange(desc(missing.values)) 
+
+num.nas[1:10,]
+```
+
+The following information was gathered from the table above:
+
+`PoolQC`, `MisFeature`, `Fence`, and `Alley` were removed for lack of distributed data in their categories.  
+
+This first round of mutations included attempts at mutating columns to make sense for the data.  For example, an `NA` value in `BsmtQual` was assumed to mean that no basement existed, so `None` was assigned.  See comments in the code below.
+
+```{r first_round_mutations}
+estate2 <- 
+  estate %>%
+  select(-PoolQC, -Fence, -MiscFeature, -Alley) %>%
+  mutate(Electrical = if_else(is.na(Electrical), 'SBrkr', Electrical), # Almost all were SBrk
+         MasVnrArea = if_else(is.na(MasVnrArea), as.integer(0), MasVnrArea)) %>% # Assumed no masonry area existed
+  mutate_at(vars(MasVnrType, BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1, BsmtFinType2, FireplaceQu, GarageType, GarageFinish, 
+                 GarageQual, GarageCond), funs(if_else(is.na(.), 'None', as.character(.)))) %>% # Assumed none of that type existed
+  mutate_at(vars(starts_with('Year')), as.numeric) # Prepared as years for model matrix
+```
+
+`LotFrontage` was my next problem, and to avoid introducing bias I used the the correlated value of `LotArea` to estimate `LotFrontage`.  Although in the end I took `LotFrontage` out, I still included the code here as I felt more comfortable with this as an imputation method.
+
+```{r log_transform_Lot_Frontage}
+estate2 %>%
+  filter(!is.na(LotFrontage)) %>%
+  ggplot(., aes(x = log(LotFrontage), y = log(LotArea))) + geom_point(color = 'blue') + 
+  ggtitle('Log-relationship of LotArea to LotFrontage')
+
+# Code to fill in values via linear model -- not run
+# model.lotfrontage <- lm(log(num.vars$LotFrontage)~ log(num.vars$LotArea))
+# slope <- as.numeric(model.lotfrontage$coefficients[2])
+# intercept <- as.numeric(model.lotfrontage$coefficients[1])
+
+estate3 <- 
+  estate2 %>%
+  # mutate(LotFrontage = if_else(is.na(LotFrontage), as.integer(exp(slope*log(LotArea) + intercept)), LotFrontage)) 
+  select(-LotFrontage)
+```
+
+
+## Exploration of Numerical Values
+
+
+
+### Binary Changes
+
+Some of the variables had distributions that looked similiar to the one below.  
+
+```{r sample_leaning_tower, message=FALSE, warning=FALSE}
+estate3 %>%
+  select(WoodDeckSF) %>%
+  ggplot(., aes(x = WoodDeckSF)) + 
+  geom_histogram(fill = 'gray', color = 'black')
+```
+
+To fit these variables to a better distribution, I changed them to be binary.  For example the WoodDeckSF was changed so that the variable represented whether or not the house had a wood deck or not.  Several others were transformed in this manner;
+
+Transformed to binary: `X2ndFlrSF`, `Fireplaces`, `HalfBath`, `BsmtFullBath`.
+
+See the adjusted distribution for for the `WoodDeckSF` variable.
+
+```{r binary_adjusts}
+estate3 %>%
+  select(WoodDeckSF) %>%
+  mutate(WoodDeck = if_else(WoodDeckSF > 0, as.integer(1), as.integer(0))) %>%
+  ggplot(., aes(x = WoodDeck)) + 
+  geom_bar()
+```
+
+Below are the other transformations I arrived at for the numerical variables:
+
+`OpenPorchSF` & `EnclosedPorch` were combined to form a binary variable that represents whether or not a Porch was open or not.  The same was tried for the `X3SsnPorch` & `ScreenPorch` variables, but the distribution didn't adjust and hence these variables were removed.
+The following variables could not be transformed and were removed: `PoolArea`, `KitchenAbvGr`, `BsmtHalfBath`, `LowQualFinSF`.
+The `X1srFlrSF` variable was removed as I found this to be equivalent to `GrLivArea`.
+
+```{r estate_3.5_form}
+estate3.5 <- 
+  estate3 %>%
+  mutate_at(vars(SalePrice, LotArea, GrLivArea, X1stFlrSF, TotalBsmtSF, OpenPorchSF), funs(log(. + 1))) %>%
+  mutate(BsmtUnfSF = sqrt(BsmtUnfSF)) %>%
+  mutate(WoodDeck = if_else(WoodDeckSF > 0, as.integer(1), as.integer(0)),
+         Fireplaces = if_else(Fireplaces > 0, as.integer(1), as.integer(0)),
+         HalfBath = if_else(HalfBath > 0, as.integer(1), as.integer(0)),
+         BsmtFullBath = if_else(BsmtFullBath > 0, as.integer(1), as.integer(0)),
+         X2ndFlrSF = if_else(X2ndFlrSF > 0, as.integer(1), as.integer(0))) %>%
+  mutate(PorchOpen = 
+           case_when(OpenPorchSF > 0 ~ 'open',
+                     EnclosedPorch > 0 ~ 'Enclosed',
+                     TRUE ~ 'None'),
+         PorchTypeScreen = 
+           case_when(X3SsnPorch > 0 ~ 'X3Ssn',
+                     ScreenPorch > 0 ~ 'Screen',
+                     TRUE ~ 'None')) %>% # This didn't help, remove it
+  dplyr::select(-PorchTypeScreen, -X3SsnPorch, -ScreenPorch, -PoolArea, -KitchenAbvGr,
+         -BsmtHalfBath, -MiscVal, -LowQualFinSF, -WoodDeckSF, -OpenPorchSF, -EnclosedPorch, -X2ndFlrSF, -X1stFlrSF, -GarageYrBlt, -Electrical) #Not sure about GarageYrBlt  , -GarageYrBlt, -GarageCars
+```
+
+
+## Exploration of Categorical Values
+
+This same process was applied to the categorical values, but I installed some metrics:
+
+1. If a category of a group had more than 85% of the data in it, this group was marked for removal.
+2.  If the ratio of the largest category to the second largest category was greater than 20, this group was removed.  
+
+```{r cat_vars_to_remove}
+thresh.pct <- 0.85
+
+cat.vars <- 
+  estate3.5 %>%
+  select_if(is.character) 
+
+cat.vars.toremove <- 
+  cat.vars %>%
+  gather(key = 'columns') %>%
+  group_by(columns, value) %>%
+  summarize(sums = n()) %>%
+  arrange(desc(sums), .by_group = TRUE) %>%
+  mutate(first.to.second = if_else(sums[1]/sums[2] > 20, 'remove', 'keep')) %>%
+  ungroup %>%
+  group_by(columns) %>%
+  mutate(tmp_bool = if_else(any(sums > thresh.pct * nrow(cat.vars)), 'remove1', 'keep1')) %>%
+  filter(tmp_bool == 'remove1' | first.to.second == 'remove') %>%
+  ungroup %>%
+  distinct(columns) 
+
+vec <- unlist(cat.vars.toremove$columns)
+```
+
+### Form the final dataset and model matrix
+
+### Transformations
+
+The method I am employing for modelling requires data to be all on the same plaing field, so I standardized all numerical categories.
+
+```{r dataset_form_model_mat, message=FALSE, warning=FALSE}
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}
+
+estate4 <- 
+  estate3.5 %>%
+  select(-one_of(vec)) %>%
+  mutate(Id = as.character(Id)) %>%
+  mutate_if(is.numeric, funs(scale_this(.))) %>%
+  mutate(Id = as.numeric(Id))
+  
+
+library(glmnet)
+mat = model.matrix( ~.-1, data = estate4)
+
+write.csv(mat, 'C:\\Users\\Owner\\Documents\\Securian interview\\Interview2\\mod_mat.csv')
+```
+
+
+```{r sample_log_dists, fig.height=3, fig.show='hold', fig.width=3, message=FALSE, warning=FALSE}
+estate3.5%>%
+  select(SalePrice) %>%
+  ggplot(aes(x = SalePrice)) + 
+  geom_histogram(fill = 'blue', color = 'black') + 
+  ggtitle('SalePrice')
+
+estate4 %>%
+  select(SalePrice) %>%
+  ggplot(aes(x = SalePrice)) + 
+  geom_histogram(fill = 'green', color = 'black') + 
+  ggtitle('Transformed SalePrice')
+```
+
+### Observations of correlation/relationship to sale price
+
+It may have behoved me to build a model from the ground up, as some variables appeared to correlate to `SalePrice`.
+
+```{r num_vars3}
+cor.vars <- 
+  estate4 %>%
+  select_if(is.numeric) %>%
+  select(OverallQual, GrLivArea, SalePrice)
+pairs(cor.vars, upper.panel = NULL, col = 'pink')
+```
+
+
+### View of some categorical values
+
+The same is true of some categorical variables, such as neighborhood.
+
+```{r box_plot_neighborhood}
+estate4 %>%
+  ggplot(aes(x = reorder(Neighborhood, SalePrice, FUN = median), y = SalePrice, fill = Neighborhood)) + 
+  geom_boxplot() + 
+  xlab('Neighborhood')+
+  coord_flip() + 
+  theme(legend.position="none")
+```
